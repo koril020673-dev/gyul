@@ -122,6 +122,8 @@ table.grid td.nowrap { white-space: nowrap; }
 table.grid.ptable { min-width: 0; width: 100%; }
 table.grid.ptable .small-input { width: 100%; min-width: 0; }
 table.grid.ptable tfoot td { border-top: 2px solid var(--line); background: var(--soft); }
+table.grid.pset { table-layout: fixed; } /* 상품 설정: colgroup 너비대로 */
+table.grid.pset th { overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 767px) {
   /* 좁은 화면: 상품마다 카드로 쌓기 (칸 이름은 data-label) */
   table.grid.ptable thead { display: none; }

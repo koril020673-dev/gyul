@@ -19,6 +19,7 @@ export default function AdminPage() {
   const [seasonStart, setSeasonStart] = useState('');
   const [showPast, setShowPast] = useState(false);
   const [flash, setFlash] = useState('');
+  const [dirty, setDirty] = useState(false); // 상품 설정에 저장하지 않은 변경이 있는지
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -48,12 +49,30 @@ export default function AdminPage() {
     [orders, seasonStart, showPast]
   );
 
+  // 저장하지 않은 변경이 있으면 페이지를 떠날 때 브라우저 경고
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e) => { e.preventDefault(); e.returnValue = ''; };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [dirty]);
+
+  function goTab(k) {
+    if (k === tab) return;
+    if (dirty && !confirm('저장하지 않은 변경이 있어요. 이동할까요?')) return;
+    setTab(k);
+  }
+
   async function startSeason() {
     const today = kstToday();
-    if (!confirm(`오늘(${today})부터 새 시즌을 시작할까요?\n지난 주문은 지워지지 않고, "지난 시즌 보기"를 켜면 다시 볼 수 있어요.`)) return;
-    const { error } = await supabase.from('settings').upsert({ key: 'season_start', value: today });
+    const ask = seasonStart
+      ? `오늘(${today})부터 새 시즌을 시작할까요?\n지난 주문은 지워지지 않고, "지난 시즌 보기"를 켜면 다시 볼 수 있어요.`
+      : `오늘(${today})을 시즌 시작일로 정할까요?\n이전 주문은 지워지지 않고, "지난 시즌 보기"를 켜면 다시 볼 수 있어요.`;
+    if (!confirm(ask)) return;
+    // settings 에 season_start 행이 없어도 upsert 로 새로 만들어짐
+    const { error } = await supabase.from('settings').upsert({ key: 'season_start', value: today }, { onConflict: 'key' });
     if (error) return notify('시즌 저장 실패: ' + error.message);
-    notify(`${today}부터 새 시즌을 시작했어요`);
+    notify(`${today}부터 시즌을 시작했어요`);
     setShowPast(false);
     reload();
   }
@@ -67,12 +86,14 @@ export default function AdminPage() {
         <div className="brand">{config.farmName} <b>관리자</b></div>
         <nav className="tabs">
           {[['orders', '주문'], ['referrals', '추천인'], ['products', '상품·판매']].map(([k, l]) => (
-            <button key={k} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>{l}</button>
+            <button key={k} aria-current={tab === k ? 'page' : undefined} onClick={() => goTab(k)}>{l}</button>
           ))}
         </nav>
         <div className="right">
-          <span>이번 시즌: {seasonStart ? `${seasonStart}부터` : '설정 안 됨'}</span>
-          <button className="btn" style={{ height: 36 }} onClick={startSeason}>새 시즌 시작</button>
+          {seasonStart
+            ? <span>이번 시즌: {seasonStart}부터</span>
+            : <span style={{ color: 'var(--accent-text)', fontWeight: 700 }}>시즌 시작일을 정해 주세요</span>}
+          <button className="btn" style={{ height: 36 }} onClick={startSeason}>{seasonStart ? '새 시즌 시작' : '시즌 시작'}</button>
           <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <input type="checkbox" checked={showPast} onChange={(e) => setShowPast(e.target.checked)} /> 지난 시즌 보기
           </label>
@@ -83,7 +104,7 @@ export default function AdminPage() {
       <main className="container">
         {tab === 'orders' && <Orders orders={seasonOrders} reload={reload} notify={notify} />}
         {tab === 'referrals' && <Referrals orders={seasonOrders} products={products} reload={reload} notify={notify} />}
-        {tab === 'products' && <Products products={products} orders={seasonOrders} reload={reload} notify={notify} />}
+        {tab === 'products' && <Products products={products} orders={seasonOrders} reload={reload} notify={notify} onDirtyChange={setDirty} />}
       </main>
       {flash && <div className="flash" role="status">{flash}</div>}
     </div>
