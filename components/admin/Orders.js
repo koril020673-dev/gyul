@@ -24,7 +24,6 @@ export default function Orders({ orders, reload, notify }) {
   const [filter, setFilter] = useState('접수');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(new Set());
-  const [split, setSplit] = useState(true);
   const [from, setFrom] = useState(''); // 엑셀 주문일 시작 (한국시간, 비우면 제한 없음)
   const [to, setTo] = useState('');     // 엑셀 주문일 끝 (그날 포함)
   const [withShipped, setWithShipped] = useState(false);
@@ -123,7 +122,7 @@ export default function Orders({ orders, reload, notify }) {
     }
     // 선택했을 때는 기간을 무시하므로 파일 이름에도 기간을 넣지 않음
     const range = sel.size ? {} : { from, to };
-    const n = downloadLotteExcel(target, { splitBoxes: split, ...range });
+    const n = downloadLotteExcel(target, range);
     notify(`${target.length}건 · ${n}줄 다운로드${skipped ? ` · 취소·파기된 주문 ${skipped}건 제외` : ''}`);
   }
 
@@ -215,9 +214,6 @@ export default function Orders({ orders, reload, notify }) {
           </div>
           <input aria-label="검색" className="small-input" placeholder="이름·연락처·주문번호" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: 180 }} />
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-            <label className="muted" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-              <input type="checkbox" checked={split} onChange={(e) => setSplit(e.target.checked)} /> 박스별로 한 줄씩
-            </label>
             <button className="btn" onClick={() => fileRef.current?.click()}>송장 엑셀 업로드</button>
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={uploadTracking} />
           </div>
