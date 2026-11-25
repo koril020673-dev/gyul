@@ -8,7 +8,7 @@ import Referrals from '@/components/admin/Referrals';
 import Products from '@/components/admin/Products';
 
 const ORDER_SELECT =
-  '*, shipments(*, shipment_items(id, qty, unit_price, product_id, products(name, weight_kg)))';
+  '*, shipments(*, shipment_items(id, qty, unit_price, product_id, products(name, weight_kg, ship_name)))';
 
 export default function AdminPage() {
   const [session, setSession] = useState(undefined);

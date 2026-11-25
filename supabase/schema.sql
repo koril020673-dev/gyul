@@ -7,6 +7,7 @@
 create table if not exists products (
   id          bigint generated always as identity primary key,
   name        text    not null,            -- 노지감귤, 한라봉
+  ship_name   text,                        -- 택배 품목명 (밀감10k). 비우면 '노지감귤10k'처럼 자동
   weight_kg   numeric not null,            -- 5, 10, 3
   price       integer not null default 0,  -- 원
   stock_boxes integer not null default 0,  -- 관리자가 입력하는 "남은 박스"
@@ -16,6 +17,8 @@ create table if not exists products (
   sort_order  integer not null default 0,
   created_at  timestamptz not null default now()
 );
+-- 예전에 만든 DB에서 다시 실행할 때를 위해 (supabase/002_ship_name.sql 과 같음)
+alter table products add column if not exists ship_name text;
 
 -- ---------- 주문 ----------
 -- 상태: 입금대기 → 입금확인 → 발송중 → 발송완료 (취소는 별도)
@@ -254,12 +257,12 @@ grant execute on function place_order(jsonb)          to anon, authenticated;
 grant execute on function lookup_orders(text, text)   to anon, authenticated;
 
 -- ---------- 처음 상품 (가격·재고는 관리자 화면에서 수정) ----------
-insert into products (name, weight_kg, price, stock_boxes, is_active, sort_order)
+insert into products (name, ship_name, weight_kg, price, stock_boxes, is_active, sort_order)
 select * from (values
-  ('노지감귤', 5,  0, 0, true,  1),
-  ('노지감귤', 10, 0, 0, true,  2),
-  ('한라봉',   3,  0, 0, false, 3)
-) v(name, weight_kg, price, stock_boxes, is_active, sort_order)
+  ('노지감귤', '밀감5k',   5,  0, 0, true,  1),
+  ('노지감귤', '밀감10k',  10, 0, 0, true,  2),
+  ('한라봉',   '한라봉3k', 3,  0, 0, false, 3)
+) v(name, ship_name, weight_kg, price, stock_boxes, is_active, sort_order)
 where not exists (select 1 from products);
 
 -- =========================================================

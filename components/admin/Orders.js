@@ -18,7 +18,7 @@ export default function Orders({ orders, reload, notify }) {
   const [filter, setFilter] = useState('입금대기');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(new Set());
-  const [split, setSplit] = useState(false);
+  const [split, setSplit] = useState(true);
   const fileRef = useRef();
 
   const shown = useMemo(() => {
