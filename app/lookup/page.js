@@ -4,7 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { config, LOTTE_TRACKING_URL } from '@/lib/config';
-import { won, date } from '@/lib/format';
+import { won, date, trackingList } from '@/lib/format';
 import StatusSteps, { StatusPill } from '@/components/StatusSteps';
 
 export default function LookupPage() {
@@ -70,12 +70,17 @@ export default function LookupPage() {
                 <div style={{ fontWeight: 700, color: 'var(--text)' }}>{s.recipient_name}님께</div>
                 <div>{s.address1}</div>
                 <div>{(s.items || []).map((it) => `${it.name} ${Number(it.weight_kg)}kg × ${it.qty}`).join(', ')}</div>
-                {s.tracking_no ? (
-                  <div style={{ marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                    <span>롯데택배 <b>{s.tracking_no}</b></span>
-                    <button type="button" className="btn" style={{ height: 36, fontSize: 13 }} onClick={() => copy(s.tracking_no)}>
-                      {copied === s.tracking_no ? '복사됨' : '송장번호 복사'}
-                    </button>
+                {trackingList(s.tracking_no).length ? (
+                  // 박스마다 송장이 하나라 여러 개일 수 있음: 송장마다 한 줄, 배송 추적 링크는 한 번만
+                  <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {trackingList(s.tracking_no).map((no) => (
+                      <div key={no} style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <span>롯데택배 <b>{no}</b></span>
+                        <button type="button" className="btn" style={{ height: 36, fontSize: 13 }} onClick={() => copy(no)}>
+                          {copied === no ? '복사됨' : '복사'}
+                        </button>
+                      </div>
+                    ))}
                     <a href={LOTTE_TRACKING_URL} target="_blank" rel="noreferrer">배송 추적</a>
                   </div>
                 ) : (

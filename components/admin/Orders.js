@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
-import { won, phone, date, kstDate, kstToday, addDays } from '@/lib/format';
+import { won, phone, date, kstDate, kstToday, addDays, trackingList } from '@/lib/format';
 import { StatusPill } from '@/components/StatusSteps';
 import { downloadLotteExcel, parseTrackingFile } from '@/lib/excel';
 import { config } from '@/lib/config';
@@ -20,6 +20,11 @@ const wonOf = (o) => (o.shipments || []).reduce((n, s) => n + (s.shipment_items 
 // 엑셀 버튼·파일 이름용 날짜 표시
 const md = (ymd) => (ymd ? `${Number(ymd.slice(5, 7))}/${Number(ymd.slice(8, 10))}` : '');
 
+// 송장 업로드 짝 맞추기용
+const personKey = (name, tel) => `${String(name || '').replace(/\s/g, '')}|${String(tel || '').replace(/\D/g, '')}`;
+const addrKey = (v) => String(v || '').replace(/[\s,.()\-]/g, '');
+const itemLabel = (it) => it.products?.ship_name?.trim() || `${it.products?.name}${Number(it.products?.weight_kg)}k`;
+
 export default function Orders({ orders, reload, notify }) {
   const [filter, setFilter] = useState('접수');
   const [q, setQ] = useState('');
@@ -27,6 +32,8 @@ export default function Orders({ orders, reload, notify }) {
   const [from, setFrom] = useState(''); // 엑셀 주문일 시작 (한국시간, 비우면 제한 없음)
   const [to, setTo] = useState('');     // 엑셀 주문일 끝 (그날 포함)
   const [withShipped, setWithShipped] = useState(false);
+  const [upload, setUpload] = useState(null);   // 송장 엑셀 업로드 결과 (닫기 전까지 보임)
+  const [editing, setEditing] = useState(null); // 송장이 여러 개인 배송지를 고치는 중이면 그 배송지 id
   const fileRef = useRef();
 
   const shown = useMemo(() => {
@@ -106,8 +113,10 @@ export default function Orders({ orders, reload, notify }) {
   }
 
   async function saveTracking(order, s, value) {
+    setEditing(null);
     if (order.purged_at) return; // 파기된 주문은 송장 수정 안 함
-    const v = value.replace(/[^0-9,\s]/g, '').trim();
+    // 쉼표로 구분해 입력 → 숫자 묶음만 남겨 ", " 로 정리
+    const v = trackingList(value).join(', ');
     if ((s.tracking_no || '') === v) return;
     const { error } = await supabase.from('shipments').update({ tracking_no: v || null }).eq('id', s.id);
     if (error) return notify('송장 저장 실패: ' + error.message);
@@ -147,35 +156,89 @@ export default function Orders({ orders, reload, notify }) {
     reload();
   }
 
+  // 택배사에서 받은 송장 엑셀 → 받는 사람 이름 + 전화번호로 배송지를 찾아 송장번호 입력
   async function uploadTracking(e) {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
-    try {
-      const map = await parseTrackingFile(file);
-      const keys = Object.keys(map);
-      if (!keys.length) return notify('주문번호(예: 1024-1)와 송장번호가 있는 줄이 없어요.');
-      // 파기된 주문은 매칭 대상에서 제외 (못 찾음으로 셈)
-      const byId = Object.fromEntries(orders.filter((o) => !o.purged_at).map((o) => [o.id, o]));
-      let ok = 0, miss = 0;
-      const shippedOrders = new Set();
-      for (const key of keys) {
-        const [oid, seq] = key.split('-').map(Number);
-        const s = byId[oid]?.shipments?.find((x) => x.seq === seq);
-        if (!s) { miss++; continue; }
-        const { error } = await supabase.from('shipments').update({ tracking_no: map[key].join(', ') }).eq('id', s.id);
-        if (error) { miss++; continue; }
-        ok++;
-        if (byId[oid].status === '접수') shippedOrders.add(oid);
+    let groups;
+    try { groups = await parseTrackingFile(file); } catch (err) { return notify(err.message); }
+    if (!groups.length) return notify('받는 사람과 송장번호가 함께 있는 줄이 없어요.');
+
+    // 짝을 찾는 대상: 취소·파기가 아니고 접수·발송중인 주문의 배송지
+    const byKey = {};
+    for (const o of orders) {
+      if (o.purged_at || !['접수', '발송중'].includes(o.status)) continue;
+      for (const s of o.shipments || []) {
+        (byKey[personKey(s.recipient_name, s.recipient_phone)] ||= []).push({ o, s, addr: addrKey(`${s.address1 || ''}${s.address2 || ''}`) });
       }
-      if (shippedOrders.size) {
-        await supabase.from('orders').update({ status: '발송중', shipped_at: new Date().toISOString() }).in('id', [...shippedOrders]);
-      }
-      notify(`송장 ${ok}곳 입력${shippedOrders.size ? `, ${shippedOrders.size}건 발송중` : ''}${miss ? ` · 못 찾음 ${miss}` : ''}`);
-      reload();
-    } catch (err) {
-      notify(err.message);
     }
+
+    const picked = {}; // 배송지 id → { o, s, nos: Set, mismatch }
+    const missed = [];
+    for (const g of groups) {
+      let cands = byKey[personKey(g.name, g.phone)] || [];
+      if (cands.length > 1) {
+        // 0) 이미 이 송장번호가 들어 있는 배송지가 있으면 그곳 (같은 파일을 다시 올린 경우)
+        const already = cands.filter((c) => trackingList(c.s.tracking_no).some((no) => g.trackings.includes(no)));
+        if (already.length) cands = already;
+      }
+      if (cands.length > 1) {
+        // a) 주소가 같거나 한쪽이 다른 쪽을 포함
+        const ga = addrKey(g.address);
+        const a = cands.filter((c) => ga && c.addr && (c.addr === ga || c.addr.includes(ga) || ga.includes(c.addr)));
+        if (a.length) cands = a;
+      }
+      if (cands.length > 1) {
+        // b) 같은 상품이 있고 그 상품 박스 수가 엑셀 수량과 같음
+        const b = cands.filter((c) => {
+          const qty = (c.s.shipment_items || []).filter((it) => itemLabel(it) === g.product).reduce((n, it) => n + it.qty, 0);
+          return qty > 0 && qty === g.qty;
+        });
+        if (b.length) cands = b;
+      }
+      if (cands.length > 1) {
+        // c) 송장이 아직 없는(이번에 넣은 것도 없는) 배송지 중 주문번호가 가장 작은 곳
+        const empty = cands.filter((c) => !c.s.tracking_no && !picked[c.s.id]).sort((x, y) => x.o.id - y.o.id || x.s.seq - y.s.seq);
+        cands = empty.slice(0, 1);
+      }
+      if (cands.length !== 1) { missed.push(g); continue; }
+      const { o, s } = cands[0];
+      const p = (picked[s.id] ||= { o, s, nos: new Set(), mismatch: false });
+      g.trackings.forEach((no) => p.nos.add(no));
+      if (g.mismatch) p.mismatch = true;
+    }
+
+    // 저장: 이미 있던 송장과 합치고 중복은 뺌. 바뀐 게 없으면 저장하지 않음
+    const list = Object.values(picked);
+    const failed = [];
+    await Promise.all(list.map(async (p) => {
+      const merged = [...new Set([...trackingList(p.s.tracking_no), ...p.nos])].join(', ');
+      if (merged === (p.s.tracking_no || '')) return;
+      const { error } = await supabase.from('shipments').update({ tracking_no: merged }).eq('id', p.s.id);
+      if (error) { failed.push(p.s.recipient_name); p.failed = true; }
+    }));
+    const ok = list.filter((p) => !p.failed);
+    const toShip = [...new Set(ok.filter((p) => p.o.status === '접수').map((p) => p.o.id))];
+    let shipped = 0;
+    if (toShip.length) {
+      const { data, error } = await supabase.from('orders')
+        .update({ status: '발송중', shipped_at: new Date().toISOString() })
+        .in('id', toShip).eq('status', '접수').select('id');
+      if (error) failed.push('발송중으로 바꾸기 실패: ' + error.message);
+      else shipped = data?.length ?? toShip.length;
+    }
+
+    setUpload({
+      file: file.name,
+      trackings: ok.reduce((n, p) => n + p.nos.size, 0),
+      places: ok.length,
+      shipped,
+      missed: missed.map((g) => ({ name: g.name, row: g.row })),
+      mismatch: ok.filter((p) => p.mismatch).map((p) => p.s.recipient_name),
+      failed,
+    });
+    reload();
   }
 
   const ids = [...sel];
@@ -192,6 +255,30 @@ export default function Orders({ orders, reload, notify }) {
         <span className="muted">{config.retention} 지난 주문은 매일 새벽 3시에 자동으로 정리돼요.</span>
         <button className="btn" onClick={purgeNow}>보관 기간 지난 개인정보 지금 정리</button>
       </div>
+
+      {upload && (
+        <section className="panel" role="status" style={{ padding: '14px 18px', marginBottom: 12, background: 'var(--accent-soft)', display: 'flex', flexDirection: 'column', gap: 6, fontSize: 14 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+            <b>송장 {upload.trackings}개 · 배송지 {upload.places}곳 입력 · 발송중으로 바뀐 주문 {upload.shipped}건</b>
+            <button className="btn-text" onClick={() => setUpload(null)}>닫기</button>
+          </div>
+          <div className="muted">{upload.file}</div>
+          {upload.missed.length > 0 && (
+            <div>
+              <b>못 찾음 {upload.missed.length}줄</b>:{' '}
+              {upload.missed.slice(0, 20).map((m) => `${m.name} (${m.row}행)`).join(', ')}
+              {upload.missed.length > 20 && ` 외 ${upload.missed.length - 20}명`}
+            </div>
+          )}
+          {upload.mismatch.length > 0 && (
+            <div><b>박스 수와 송장 수가 다름 {upload.mismatch.length}곳</b>: {upload.mismatch.join(', ')}</div>
+          )}
+          {upload.failed.length > 0 && (
+            <div style={{ color: '#B42318' }}><b>저장 실패</b>: {upload.failed.join(', ')}</div>
+          )}
+          <div className="muted">못 찾은 송장은 주문 표의 송장 칸에 직접 넣을 수 있어요. 여러 개면 쉼표로 구분해요.</div>
+        </section>
+      )}
 
       <section className="panel">
         <div className="panel-head">
@@ -312,18 +399,32 @@ export default function Orders({ orders, reload, notify }) {
                     {o.paid_at && <div className="muted" style={{ fontSize: 12 }}>{date(o.paid_at)}</div>}
                   </td>
                   <td>
-                    {[...(o.shipments || [])].sort((a, b) => a.seq - b.seq).map((s) => (
-                      <div className="ship-line" key={s.id}>
-                        <input
-                          className="tracking-input" aria-label={o.purged_at ? `${o.id}-${s.seq} 송장번호` : `${s.recipient_name} 송장번호`}
-                          defaultValue={s.tracking_no || ''} placeholder={`${o.id}-${s.seq}`}
-                          key={s.tracking_no || 'empty'}
-                          onBlur={(e) => saveTracking(o, s, e.target.value)}
-                          onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
-                          disabled={o.status === '취소' || !!o.purged_at}
-                        />
-                      </div>
-                    ))}
+                    {[...(o.shipments || [])].sort((a, b) => a.seq - b.seq).map((s) => {
+                      const nos = trackingList(s.tracking_no);
+                      const locked = o.status === '취소' || !!o.purged_at;
+                      // 송장이 여러 개면 한 줄에 하나씩 보여주고, "고치기"를 누르면 쉼표로 이은 입력칸
+                      if (nos.length > 1 && editing !== s.id) {
+                        return (
+                          <div className="ship-line" key={s.id}>
+                            {nos.map((no) => <span key={no} className="nowrap" style={{ fontSize: 13 }}>{no}</span>)}
+                            {!locked && <button className="btn-text" style={{ alignSelf: 'flex-start', fontSize: 13 }} onClick={() => setEditing(s.id)}>고치기</button>}
+                          </div>
+                        );
+                      }
+                      return (
+                        <div className="ship-line" key={s.id}>
+                          <input
+                            className="tracking-input" aria-label={o.purged_at ? `${o.id}-${s.seq} 송장번호` : `${s.recipient_name} 송장번호`}
+                            defaultValue={nos.join(', ')} placeholder={nos.length ? '' : '쉼표로 여러 개'}
+                            key={s.tracking_no || 'empty'}
+                            autoFocus={editing === s.id}
+                            onBlur={(e) => saveTracking(o, s, e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+                            disabled={locked}
+                          />
+                        </div>
+                      );
+                    })}
                   </td>
                 </tr>
               ))}
@@ -334,8 +435,9 @@ export default function Orders({ orders, reload, notify }) {
           </table>
         </div>
         <div className="panel-foot">
-          엑셀은 받는 분 한 곳당 한 줄이고, 주문번호는 &quot;주문-받는분순서&quot;(예: 1024-1)로 나가요. 추천인은 엑셀에 포함되지 않아요.
-          송장번호를 넣거나 송장 엑셀을 올리면 접수 주문이 자동으로 발송중이 돼요. 입금 여부는 배송과 따로 체크해요.
+          엑셀은 받는 분 한 곳·상품 한 종류당 한 줄이고, A열(주문번호)은 빈칸으로 나가요. 추천인은 엑셀에 포함되지 않아요.
+          택배사에서 송장번호를 붙여 돌려준 엑셀을 그대로 &quot;송장 엑셀 업로드&quot;로 올리면 받는 사람 이름 + 전화번호로 배송지를 찾아 송장이 들어가요(박스마다 송장 하나).
+          못 찾은 건 표의 송장 칸에 직접 넣으면 되고, 여러 개는 쉼표로 구분해요. 송장이 들어가면 접수 주문이 자동으로 발송중이 돼요. 입금 여부는 배송과 따로 체크해요.
         </div>
       </section>
     </>
