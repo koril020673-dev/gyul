@@ -2,39 +2,42 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
-import { won } from '@/lib/format';
+import { won, productLabel } from '@/lib/format';
 
-const blank = { name: '', ship_name: '', weight_kg: '', price: '', stock_boxes: '', is_active: false, sale_start: '', sale_end: '' };
+const blank = { name: '', ship_name: '', weight_kg: '', price: '', is_active: false, sale_end: '' };
 
 export default function Products({ products, orders = [], reload, notify }) {
   const [rows, setRows] = useState([]);
   const [adding, setAdding] = useState(blank);
 
-  useEffect(() => { setRows(products.map((p) => ({ ...p, ship_name: p.ship_name || '', sale_start: p.sale_start || '', sale_end: p.sale_end || '' }))); }, [products]);
+  useEffect(() => { setRows(products.map((p) => ({ ...p, ship_name: p.ship_name || '', sale_end: p.sale_end || '' }))); }, [products]);
 
-  // 판매 집계: 취소를 뺀 주문(파기된 주문 포함)의 shipment_items 기준, 금액은 주문 당시 단가 × 수량
+  // 판매 현황: 취소를 뺀 주문(시즌 필터 적용, 파기된 주문 포함)의 박스 수.
+  // 금액은 모두 "박스 수 × 상품의 현재 가격"으로 계산 (주문 당시 단가 unit_price 는 쓰지 않음)
   const sales = useMemo(() => {
-    const byProduct = {};
-    const total = { boxes: 0, kg: 0, amount: 0, paid: 0, unpaid: 0 };
+    const boxes = {};
     for (const o of orders) {
       if (o.status === '취소') continue;
       for (const s of o.shipments || []) for (const it of s.shipment_items || []) {
-        const kg = it.qty * Number(it.products?.weight_kg || 0);
-        const amount = it.qty * (it.unit_price || 0);
-        const p = (byProduct[it.product_id] ||= { boxes: 0, kg: 0, amount: 0 });
-        p.boxes += it.qty; p.kg += kg; p.amount += amount;
-        total.boxes += it.qty; total.kg += kg; total.amount += amount;
-        if (o.paid_at) total.paid += amount; else total.unpaid += amount;
+        const b = (boxes[it.product_id] ||= { sold: 0, pack: 0, paid: 0, unpaid: 0 });
+        b.sold += it.qty;
+        if (o.status === '접수') b.pack += it.qty;
+        if (o.paid_at) b.paid += it.qty; else b.unpaid += it.qty;
       }
     }
-    return { byProduct, total };
-  }, [orders]);
+    const list = products.map((p) => {
+      const b = boxes[p.id] || { sold: 0, pack: 0, paid: 0, unpaid: 0 };
+      const price = p.price || 0;
+      return { p, ...b, amount: b.sold * price, paidWon: b.paid * price, unpaidWon: b.unpaid * price };
+    });
+    const sum = (k) => list.reduce((n, r) => n + r[k], 0);
+    return { list, total: { sold: sum('sold'), pack: sum('pack'), amount: sum('amount'), paidWon: sum('paidWon'), unpaidWon: sum('unpaidWon') } };
+  }, [orders, products]);
 
   const edit = (id, patch) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   const clean = (r) => ({
     name: r.name.trim(), ship_name: (r.ship_name || '').trim() || null, weight_kg: Number(r.weight_kg), price: Number(r.price) || 0,
-    stock_boxes: Number(r.stock_boxes) || 0, is_active: !!r.is_active,
-    sale_start: r.sale_start || null, sale_end: r.sale_end || null,
+    is_active: !!r.is_active, sale_end: r.sale_end || null,
   });
 
   async function save(r) {
@@ -52,69 +55,78 @@ export default function Products({ products, orders = [], reload, notify }) {
   }
 
   return (
-    <section className="panel">
-      <div className="panel-head">
-        <h2>상품 · 재고</h2>
-        <span className="muted">남은 박스가 1개라도 있으면 그 주문은 다 받고, 접수 박스가 재고 이상이 되면 주문서에 품절이 떠요. 고객에게 수량은 안 보여요.</span>
-      </div>
-      <div className="scroll">
-        <table className="grid" style={{ minWidth: 1380 }}>
+    <>
+      <section className="panel">
+        <div className="panel-head">
+          <h2>판매 현황</h2>
+          <span className="muted">취소를 뺀 주문 기준 · 금액은 박스 수 × 현재 가격 · 위쪽 시즌 설정 기준</span>
+        </div>
+        <table className="grid ptable">
           <thead>
             <tr>
-              <th>판매</th><th>상품명</th><th>택배 품목명</th><th>중량(kg)</th><th>가격(원)</th><th>재고(박스)</th>
-              <th>접수 / 남음</th><th>판매 기간 (비우면 제한 없음)</th><th>판매 박스</th><th>판매 kg</th><th>판매금액</th><th></th>
+              <th>상품</th><th>판매 박스</th><th>포장할 박스</th><th>판매금액</th><th>입금확인 금액</th><th>미입금 금액</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((r) => {
-              const left = (Number(r.stock_boxes) || 0) - r.reserved;
-              return (
-                <tr key={r.id}>
-                  <td><input type="checkbox" aria-label={`${r.name} 판매`} checked={r.is_active} onChange={(e) => edit(r.id, { is_active: e.target.checked })} style={{ width: 20, height: 20 }} /></td>
-                  <td><input className="small-input" aria-label="상품명" value={r.name} onChange={(e) => edit(r.id, { name: e.target.value })} style={{ width: 110 }} /></td>
-                  <td><input className="small-input" aria-label={`${r.name} 택배 품목명`} placeholder={`${r.name}${Number(r.weight_kg) || ''}k`} value={r.ship_name} onChange={(e) => edit(r.id, { ship_name: e.target.value })} style={{ width: 100 }} /></td>
-                  <td><input className="small-input" aria-label="중량" type="number" value={r.weight_kg} onChange={(e) => edit(r.id, { weight_kg: e.target.value })} style={{ width: 70 }} /></td>
-                  <td><input className="small-input" aria-label="가격" type="number" value={r.price} onChange={(e) => edit(r.id, { price: e.target.value })} style={{ width: 100 }} /></td>
-                  <td><input className="small-input" aria-label="재고" type="number" value={r.stock_boxes} onChange={(e) => edit(r.id, { stock_boxes: e.target.value })} style={{ width: 80 }} /></td>
-                  <td className="nowrap">
-                    {r.reserved}박스 / <b style={{ color: left < 0 ? '#8A3A06' : left === 0 ? 'var(--sub)' : 'var(--green)' }}>{left}박스</b>
-                    {left <= 0 && <div className="soldout">품절 {left < 0 && `(${-left}박스 초과 접수)`}</div>}
-                  </td>
-                  <td className="nowrap">
-                    <input className="small-input" type="date" aria-label="시작일" value={r.sale_start} onChange={(e) => edit(r.id, { sale_start: e.target.value })} />
-                    {' ~ '}
-                    <input className="small-input" type="date" aria-label="종료일" value={r.sale_end} onChange={(e) => edit(r.id, { sale_end: e.target.value })} />
-                  </td>
-                  <td className="nowrap">{sales.byProduct[r.id]?.boxes || 0}박스</td>
-                  <td className="nowrap">{sales.byProduct[r.id]?.kg || 0}kg</td>
-                  <td className="nowrap">{won(sales.byProduct[r.id]?.amount)}</td>
-                  <td><button className="btn btn-primary" style={{ height: 38 }} onClick={() => save(r)}>저장</button></td>
-                </tr>
-              );
-            })}
+            {sales.list.map((r) => (
+              <tr key={r.p.id} style={r.p.is_active ? undefined : { color: 'var(--sub)' }}>
+                <td data-label="상품"><b>{productLabel(r.p)}</b>{!r.p.is_active && <span className="muted"> (판매 안 함)</span>}</td>
+                <td data-label="판매 박스">{r.sold}박스</td>
+                <td data-label="포장할 박스">{r.pack}박스</td>
+                <td data-label="판매금액">{won(r.amount)}</td>
+                <td data-label="입금확인 금액">{won(r.paidWon)}</td>
+                <td data-label="미입금 금액">{won(r.unpaidWon)}</td>
+              </tr>
+            ))}
+          </tbody>
+          <tfoot>
             <tr>
-              <td><input type="checkbox" aria-label="판매" checked={adding.is_active} onChange={(e) => setAdding({ ...adding, is_active: e.target.checked })} style={{ width: 20, height: 20 }} /></td>
-              <td><input className="small-input" aria-label="새 상품명" placeholder="새 상품" value={adding.name} onChange={(e) => setAdding({ ...adding, name: e.target.value })} style={{ width: 110 }} /></td>
-              <td><input className="small-input" aria-label="새 택배 품목명" placeholder="예: 밀감10k" value={adding.ship_name} onChange={(e) => setAdding({ ...adding, ship_name: e.target.value })} style={{ width: 100 }} /></td>
-              <td><input className="small-input" aria-label="새 중량" type="number" value={adding.weight_kg} onChange={(e) => setAdding({ ...adding, weight_kg: e.target.value })} style={{ width: 70 }} /></td>
-              <td><input className="small-input" aria-label="새 가격" type="number" value={adding.price} onChange={(e) => setAdding({ ...adding, price: e.target.value })} style={{ width: 100 }} /></td>
-              <td><input className="small-input" aria-label="새 재고" type="number" value={adding.stock_boxes} onChange={(e) => setAdding({ ...adding, stock_boxes: e.target.value })} style={{ width: 80 }} /></td>
-              <td></td>
-              <td className="nowrap">
-                <input className="small-input" type="date" aria-label="새 시작일" value={adding.sale_start} onChange={(e) => setAdding({ ...adding, sale_start: e.target.value })} />
-                {' ~ '}
-                <input className="small-input" type="date" aria-label="새 종료일" value={adding.sale_end} onChange={(e) => setAdding({ ...adding, sale_end: e.target.value })} />
-              </td>
-              <td></td><td></td><td></td>
-              <td><button className="btn" style={{ height: 38 }} onClick={add}>추가</button></td>
+              <td data-label="상품"><b>합계</b></td>
+              <td data-label="판매 박스"><b>{sales.total.sold}박스</b></td>
+              <td data-label="포장할 박스"><b>{sales.total.pack}박스</b></td>
+              <td data-label="판매금액"><b style={{ color: 'var(--accent-text)' }}>{won(sales.total.amount)}</b></td>
+              <td data-label="입금확인 금액"><b>{won(sales.total.paidWon)}</b></td>
+              <td data-label="미입금 금액"><b>{won(sales.total.unpaidWon)}</b></td>
+            </tr>
+          </tfoot>
+        </table>
+      </section>
+
+      <section className="panel">
+        <div className="panel-head">
+          <h2>상품 설정</h2>
+          <span className="muted">판매를 켜 두면 주문서에 보여요. 판매 종료일이 지나면 자동으로 주문서에서 빠져요.</span>
+        </div>
+        <table className="grid ptable">
+          <thead>
+            <tr>
+              <th>판매</th><th>상품명</th><th>택배 품목명</th><th>중량(kg)</th><th>가격(원)</th><th>판매 종료일 (비우면 계속 판매)</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td data-label="판매"><input type="checkbox" aria-label={`${r.name} 판매`} checked={r.is_active} onChange={(e) => edit(r.id, { is_active: e.target.checked })} style={{ width: 20, height: 20 }} /></td>
+                <td data-label="상품명"><input className="small-input" aria-label="상품명" value={r.name} onChange={(e) => edit(r.id, { name: e.target.value })} /></td>
+                <td data-label="택배 품목명"><input className="small-input" aria-label={`${r.name} 택배 품목명`} placeholder={`${r.name}${Number(r.weight_kg) || ''}k`} value={r.ship_name} onChange={(e) => edit(r.id, { ship_name: e.target.value })} /></td>
+                <td data-label="중량(kg)"><input className="small-input" aria-label="중량" type="number" value={r.weight_kg} onChange={(e) => edit(r.id, { weight_kg: e.target.value })} /></td>
+                <td data-label="가격(원)"><input className="small-input" aria-label="가격" type="number" value={r.price} onChange={(e) => edit(r.id, { price: e.target.value })} /></td>
+                <td data-label="판매 종료일"><input className="small-input" type="date" aria-label="판매 종료일" value={r.sale_end} onChange={(e) => edit(r.id, { sale_end: e.target.value })} /></td>
+                <td data-label=""><button className="btn btn-primary" style={{ height: 38 }} onClick={() => save(r)}>저장</button></td>
+              </tr>
+            ))}
+            <tr>
+              <td data-label="판매"><input type="checkbox" aria-label="판매" checked={adding.is_active} onChange={(e) => setAdding({ ...adding, is_active: e.target.checked })} style={{ width: 20, height: 20 }} /></td>
+              <td data-label="상품명"><input className="small-input" aria-label="새 상품명" placeholder="새 상품" value={adding.name} onChange={(e) => setAdding({ ...adding, name: e.target.value })} /></td>
+              <td data-label="택배 품목명"><input className="small-input" aria-label="새 택배 품목명" placeholder="예: 밀감10k" value={adding.ship_name} onChange={(e) => setAdding({ ...adding, ship_name: e.target.value })} /></td>
+              <td data-label="중량(kg)"><input className="small-input" aria-label="새 중량" type="number" value={adding.weight_kg} onChange={(e) => setAdding({ ...adding, weight_kg: e.target.value })} /></td>
+              <td data-label="가격(원)"><input className="small-input" aria-label="새 가격" type="number" value={adding.price} onChange={(e) => setAdding({ ...adding, price: e.target.value })} /></td>
+              <td data-label="판매 종료일"><input className="small-input" type="date" aria-label="새 판매 종료일" value={adding.sale_end} onChange={(e) => setAdding({ ...adding, sale_end: e.target.value })} /></td>
+              <td data-label=""><button className="btn" style={{ height: 38 }} onClick={add}>추가</button></td>
             </tr>
           </tbody>
         </table>
-      </div>
-      <div className="panel-foot">
-        <b>전체 합계</b> · 총 {sales.total.boxes}박스 · {sales.total.kg}kg · 판매금액 {won(sales.total.amount)}
-        {' '}(입금확인 {won(sales.total.paid)} · 미입금 {won(sales.total.unpaid)}) · 취소 제외, 주문 당시 가격 기준
-      </div>
-    </section>
+      </section>
+    </>
   );
 }

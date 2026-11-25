@@ -17,15 +17,14 @@ export default function Referrals({ orders, products, reload, notify }) {
       if (!o.referrer_name) continue;
       all.add(o.referrer_name);
       if (o.status === '취소') continue;
-      const r = (map[o.referrer_name] ||= { name: o.referrer_name, orders: 0, byProduct: {}, boxes: 0, kg: 0 });
+      const r = (map[o.referrer_name] ||= { name: o.referrer_name, orders: 0, byProduct: {}, boxes: 0 });
       r.orders++;
       for (const s of o.shipments || []) for (const it of s.shipment_items || []) {
         r.byProduct[it.product_id] = (r.byProduct[it.product_id] || 0) + it.qty;
         r.boxes += it.qty;
-        r.kg += it.qty * Number(it.products.weight_kg);
       }
     }
-    return { rows: Object.values(map).sort((a, b) => b.kg - a.kg), names: [...all].sort() };
+    return { rows: Object.values(map).sort((a, b) => b.boxes - a.boxes), names: [...all].sort() };
   }, [orders]);
 
   async function merge() {
@@ -43,7 +42,7 @@ export default function Referrals({ orders, products, reload, notify }) {
       <section className="panel">
         <div className="panel-head">
           <h2>추천인별 판매</h2>
-          <span className="muted">취소를 뺀 모든 주문(접수·발송중·발송완료) 집계</span>
+          <span className="muted">취소를 뺀 모든 주문(접수·발송중·발송완료) 집계 · 위쪽 시즌 설정 기준</span>
         </div>
         <div className="scroll">
           <table className="grid" style={{ minWidth: 640 }}>
@@ -61,7 +60,7 @@ export default function Referrals({ orders, products, reload, notify }) {
                   <td><b>{r.name}</b></td>
                   <td>{r.orders}건</td>
                   {products.map((p) => <td key={p.id}>{r.byProduct[p.id] ? `${r.byProduct[p.id]}박스` : '-'}</td>)}
-                  <td><b style={{ color: 'var(--accent-text)' }}>{r.boxes}박스 · {r.kg}kg</b></td>
+                  <td><b style={{ color: 'var(--accent-text)' }}>{r.boxes}박스</b></td>
                 </tr>
               ))}
               {rows.length === 0 && <tr><td colSpan={products.length + 3} className="muted" style={{ padding: 24, textAlign: 'center' }}>아직 집계할 추천 주문이 없어요.</td></tr>}

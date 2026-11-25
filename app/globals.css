@@ -91,7 +91,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; colo
 .tabs button { border: 0; background: none; padding: 10px 14px; border-radius: 8px; color: var(--sub); cursor: pointer; }
 .tabs button[aria-current='page'] { background: var(--accent-soft); color: var(--accent-text); font-weight: 700; }
 .topbar .right { margin-left: auto; display: flex; gap: 12px; align-items: center; font-size: 13px; color: var(--sub); }
-.container { max-width: 1320px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
+.container { max-width: 1600px; margin: 0 auto; padding: 24px; display: flex; flex-direction: column; gap: 20px; }
 .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
 .stat { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
 .stat div { font-size: 13px; color: var(--sub); }
@@ -117,3 +117,18 @@ table.grid td.nowrap { white-space: nowrap; }
 .panel-foot { padding: 12px 18px; font-size: 13px; color: var(--sub); }
 .login { max-width: 360px; margin: 12vh auto; }
 .flash { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: var(--text); color: #fff; padding: 12px 18px; border-radius: 10px; font-size: 14px; z-index: 50; max-width: 90vw; }
+
+/* ---------- 상품·판매 탭: 가로 스크롤 없이 화면 너비에 맞춤 ---------- */
+table.grid.ptable { min-width: 0; width: 100%; }
+table.grid.ptable .small-input { width: 100%; min-width: 0; }
+table.grid.ptable tfoot td { border-top: 2px solid var(--line); background: var(--soft); }
+@media (max-width: 767px) {
+  /* 좁은 화면: 상품마다 카드로 쌓기 (칸 이름은 data-label) */
+  table.grid.ptable thead { display: none; }
+  table.grid.ptable, table.grid.ptable tbody, table.grid.ptable tfoot, table.grid.ptable tr { display: block; width: 100%; }
+  table.grid.ptable tr { border-top: 1px solid var(--line); padding: 8px 0; }
+  table.grid.ptable td { display: flex; justify-content: space-between; align-items: center; gap: 12px; border-top: 0; padding: 6px 16px; background: none; }
+  table.grid.ptable td::before { content: attr(data-label); color: var(--sub); font-size: 13px; flex: none; }
+  table.grid.ptable td .small-input { width: 60%; }
+  table.grid.ptable tfoot tr { background: var(--soft); border-top: 2px solid var(--line); }
+}

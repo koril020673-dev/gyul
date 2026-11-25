@@ -1,20 +1,23 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/lib/config';
+import { kstDate, kstToday } from '@/lib/format';
 import Orders from '@/components/admin/Orders';
 import Referrals from '@/components/admin/Referrals';
 import Products from '@/components/admin/Products';
 
 const ORDER_SELECT =
-  '*, shipments(*, shipment_items(id, qty, unit_price, product_id, products(name, weight_kg, ship_name)))';
+  '*, shipments(*, shipment_items(id, qty, unit_price, product_id, products(name, weight_kg, ship_name, price)))';
 
 export default function AdminPage() {
   const [session, setSession] = useState(undefined);
   const [tab, setTab] = useState('orders');
   const [orders, setOrders] = useState([]);
   const [products, setProducts] = useState([]);
+  const [seasonStart, setSeasonStart] = useState('');
+  const [showPast, setShowPast] = useState(false);
   const [flash, setFlash] = useState('');
 
   useEffect(() => {
@@ -26,18 +29,34 @@ export default function AdminPage() {
   const notify = useCallback((msg) => { setFlash(msg); setTimeout(() => setFlash(''), 2500); }, []);
 
   const reload = useCallback(async () => {
-    const [o, p, r] = await Promise.all([
+    const [o, p, st] = await Promise.all([
       supabase.from('orders').select(ORDER_SELECT).order('id', { ascending: false }).limit(2000),
       supabase.from('products').select('*').order('sort_order').order('id'),
-      supabase.from('product_reserved').select('*'),
+      supabase.from('settings').select('value').eq('key', 'season_start').maybeSingle(),
     ]);
     if (o.error || p.error) { notify('불러오기 실패: ' + (o.error || p.error).message); return; }
-    const reserved = Object.fromEntries((r.data || []).map((x) => [x.product_id, x.reserved_boxes]));
     setOrders(o.data || []);
-    setProducts((p.data || []).map((x) => ({ ...x, reserved: reserved[x.id] || 0 })));
+    setProducts(p.data || []);
+    setSeasonStart(st.data?.value || '');
   }, [notify]);
 
   useEffect(() => { if (session) reload(); }, [session, reload]);
+
+  // 이번 시즌 주문만 (한국시간 주문일 >= 시즌 시작일). 지난 시즌 주문은 지우지 않고 숨기기만 함
+  const seasonOrders = useMemo(
+    () => (showPast || !seasonStart ? orders : orders.filter((o) => kstDate(o.created_at) >= seasonStart)),
+    [orders, seasonStart, showPast]
+  );
+
+  async function startSeason() {
+    const today = kstToday();
+    if (!confirm(`오늘(${today})부터 새 시즌을 시작할까요?\n지난 주문은 지워지지 않고, "지난 시즌 보기"를 켜면 다시 볼 수 있어요.`)) return;
+    const { error } = await supabase.from('settings').upsert({ key: 'season_start', value: today });
+    if (error) return notify('시즌 저장 실패: ' + error.message);
+    notify(`${today}부터 새 시즌을 시작했어요`);
+    setShowPast(false);
+    reload();
+  }
 
   if (session === undefined) return null;
   if (!session) return <Login />;
@@ -47,19 +66,24 @@ export default function AdminPage() {
       <header className="topbar">
         <div className="brand">{config.farmName} <b>관리자</b></div>
         <nav className="tabs">
-          {[['orders', '주문'], ['referrals', '추천인'], ['products', '상품·재고']].map(([k, l]) => (
+          {[['orders', '주문'], ['referrals', '추천인'], ['products', '상품·판매']].map(([k, l]) => (
             <button key={k} aria-current={tab === k ? 'page' : undefined} onClick={() => setTab(k)}>{l}</button>
           ))}
         </nav>
         <div className="right">
+          <span>이번 시즌: {seasonStart ? `${seasonStart}부터` : '설정 안 됨'}</span>
+          <button className="btn" style={{ height: 36 }} onClick={startSeason}>새 시즌 시작</button>
+          <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+            <input type="checkbox" checked={showPast} onChange={(e) => setShowPast(e.target.checked)} /> 지난 시즌 보기
+          </label>
           <button className="btn" style={{ height: 36 }} onClick={reload}>새로고침</button>
           <button className="btn-text" onClick={() => supabase.auth.signOut()}>로그아웃</button>
         </div>
       </header>
       <main className="container">
-        {tab === 'orders' && <Orders orders={orders} reload={reload} notify={notify} />}
-        {tab === 'referrals' && <Referrals orders={orders} products={products} reload={reload} notify={notify} />}
-        {tab === 'products' && <Products products={products} orders={orders} reload={reload} notify={notify} />}
+        {tab === 'orders' && <Orders orders={seasonOrders} reload={reload} notify={notify} />}
+        {tab === 'referrals' && <Referrals orders={seasonOrders} products={products} reload={reload} notify={notify} />}
+        {tab === 'products' && <Products products={products} orders={seasonOrders} reload={reload} notify={notify} />}
       </main>
       {flash && <div className="flash" role="status">{flash}</div>}
     </div>

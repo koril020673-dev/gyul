@@ -2,7 +2,7 @@
 
 import { useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
-import { won, phone, date } from '@/lib/format';
+import { won, phone, date, kstDate, kstToday, addDays } from '@/lib/format';
 import { StatusPill } from '@/components/StatusSteps';
 import { downloadLotteExcel, parseTrackingFile } from '@/lib/excel';
 import { config } from '@/lib/config';
@@ -15,13 +15,19 @@ const STAMP = { 발송중: 'shipped_at', 발송완료: 'delivered_at' };
 const isUnpaid = (o) => !o.paid_at && o.status !== '취소';
 
 const boxesOf = (o) => (o.shipments || []).reduce((n, s) => n + (s.shipment_items || []).reduce((m, it) => m + it.qty, 0), 0);
-const kgOf = (o) => (o.shipments || []).reduce((n, s) => n + (s.shipment_items || []).reduce((m, it) => m + it.qty * Number(it.products.weight_kg), 0), 0);
+// 금액 = 박스 수 × 상품의 현재 가격 (상품·판매 탭과 같은 방식)
+const wonOf = (o) => (o.shipments || []).reduce((n, s) => n + (s.shipment_items || []).reduce((m, it) => m + it.qty * (it.products?.price || 0), 0), 0);
+// 엑셀 버튼·파일 이름용 날짜 표시
+const md = (ymd) => (ymd ? `${Number(ymd.slice(5, 7))}/${Number(ymd.slice(8, 10))}` : '');
 
 export default function Orders({ orders, reload, notify }) {
   const [filter, setFilter] = useState('접수');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(new Set());
   const [split, setSplit] = useState(true);
+  const [from, setFrom] = useState(''); // 엑셀 주문일 시작 (한국시간, 비우면 제한 없음)
+  const [to, setTo] = useState('');     // 엑셀 주문일 끝 (그날 포함)
+  const [withShipped, setWithShipped] = useState(false);
   const fileRef = useRef();
 
   const shown = useMemo(() => {
@@ -41,11 +47,34 @@ export default function Orders({ orders, reload, notify }) {
     return {
       ready: ready.length,
       boxes: ready.reduce((n, o) => n + boxesOf(o), 0),
-      kg: ready.reduce((n, o) => n + kgOf(o), 0),
       unpaid: unpaid.length,
-      unpaidWon: unpaid.reduce((n, o) => n + (o.total_price || 0), 0),
+      unpaidWon: unpaid.reduce((n, o) => n + wonOf(o), 0),
     };
   }, [orders]);
+
+  // 롯데택배 엑셀 대상
+  // - 선택한 주문이 있으면 그것만 (기간·상태 무시)
+  // - 없으면 주문일(한국시간)이 기간 안이고 '접수'인 주문 (+ 체크 시 '발송중'·'발송완료')
+  // - 취소·개인정보 파기된 주문은 항상 제외
+  const excel = useMemo(() => {
+    const ok = (o) => o.status !== '취소' && !o.purged_at;
+    if (sel.size) {
+      const picked = orders.filter((o) => sel.has(o.id));
+      const target = picked.filter(ok);
+      return { target, skipped: picked.length - target.length, label: `선택 ${sel.size}건` };
+    }
+    const statuses = withShipped ? ['접수', '발송중', '발송완료'] : ['접수'];
+    const target = orders.filter((o) => {
+      if (!ok(o) || !statuses.includes(o.status)) return false;
+      const d = kstDate(o.created_at);
+      return (!from || d >= from) && (!to || d <= to);
+    });
+    const what = withShipped ? '접수·발송' : '접수';
+    const range = from || to ? `${md(from)}~${md(to)} ${what}` : `${what} 전체`;
+    return { target, skipped: 0, label: `${range} ${target.length}건` };
+  }, [orders, sel, from, to, withShipped]);
+
+  const quick = (a, b) => { setFrom(a); setTo(b); };
 
   const toggle = (id) => setSel((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const allOn = shown.length > 0 && shown.every((o) => sel.has(o.id));
@@ -58,7 +87,7 @@ export default function Orders({ orders, reload, notify }) {
     const ids = picked.filter((id) => !purged.has(id));
     const skipped = picked.length - ids.length;
     if (!ids.length) return notify(`파기된 주문 ${skipped}건은 상태를 바꿀 수 없어요.`);
-    if (status === '취소' && !confirm(`${ids.length}건을 취소할까요? 잡아둔 재고가 풀려요.`)) return;
+    if (status === '취소' && !confirm(`${ids.length}건을 취소할까요?`)) return;
     const patch = { status };
     if (STAMP[status]) patch[STAMP[status]] = new Date().toISOString();
     const { error } = await supabase.from('orders').update(patch).in('id', ids);
@@ -88,14 +117,26 @@ export default function Orders({ orders, reload, notify }) {
   }
 
   function exportExcel() {
-    // 기본 대상: 선택한 주문, 없으면 접수 상태 전체 (입금 여부 무관)
-    const picked = sel.size ? orders.filter((o) => sel.has(o.id)) : orders.filter((o) => o.status === '접수');
-    // 개인정보가 파기된 주문은 주소가 없으므로 엑셀에서 제외
-    const target = picked.filter((o) => !o.purged_at);
-    const skipped = picked.length - target.length;
-    if (!target.length) return notify(skipped ? '선택한 주문은 모두 개인정보가 파기되어 내보낼 수 없어요.' : '내보낼 주문이 없어요. 접수 주문이 있거나 선택해야 해요.');
-    const n = downloadLotteExcel(target, { splitBoxes: split });
-    notify(`${target.length}건 · ${n}줄 다운로드${skipped ? ` · 파기된 주문 ${skipped}건 제외` : ''}`);
+    const { target, skipped } = excel;
+    if (!target.length) {
+      return notify(skipped ? '선택한 주문은 모두 취소됐거나 개인정보가 파기되어 내보낼 수 없어요.' : '내보낼 주문이 없어요. 기간과 상태를 확인하거나 주문을 선택해 주세요.');
+    }
+    // 선택했을 때는 기간을 무시하므로 파일 이름에도 기간을 넣지 않음
+    const range = sel.size ? {} : { from, to };
+    const n = downloadLotteExcel(target, { splitBoxes: split, ...range });
+    notify(`${target.length}건 · ${n}줄 다운로드${skipped ? ` · 취소·파기된 주문 ${skipped}건 제외` : ''}`);
+  }
+
+  async function deleteSelected() {
+    const ids = [...sel];
+    if (!ids.length) return;
+    if (!confirm(`선택한 ${ids.length}건을 완전히 삭제할까요? 되돌릴 수 없어요.`)) return;
+    // 배송지·상품은 DB에서 함께 지워짐 (on delete cascade)
+    const { data, error } = await supabase.from('orders').delete().in('id', ids).select('id');
+    if (error) return notify('삭제 실패: ' + error.message);
+    notify(`${data?.length ?? ids.length}건 삭제했어요`);
+    setSel(new Set());
+    reload();
   }
 
   async function purgeNow() {
@@ -144,8 +185,7 @@ export default function Orders({ orders, reload, notify }) {
     <>
       <div className="stats">
         <div className="stat"><div>발송 대기 (접수)</div><strong>{stats.ready}건</strong></div>
-        <div className="stat"><div>발송할 박스</div><strong>{stats.boxes}박스</strong></div>
-        <div className="stat"><div>발송할 중량</div><strong>{stats.kg}kg</strong></div>
+        <div className="stat"><div>포장할 박스</div><strong>{stats.boxes}박스</strong></div>
         <div className="stat"><div>미입금</div><strong>{stats.unpaid}건</strong><div>{won(stats.unpaidWon)}</div></div>
       </div>
 
@@ -166,6 +206,12 @@ export default function Orders({ orders, reload, notify }) {
             <button className="chip" aria-pressed={filter === UNPAID} onClick={() => { setFilter(UNPAID); setSel(new Set()); }}>
               {UNPAID} {orders.filter(isUnpaid).length}
             </button>
+            <button
+              type="button" onClick={deleteSelected} disabled={!sel.size}
+              style={{ height: 36, padding: '0 12px', border: 0, borderRadius: 4, background: '#B42318', color: '#fff', fontSize: 13, fontWeight: 700, cursor: sel.size ? 'pointer' : 'not-allowed', opacity: sel.size ? 1 : 0.4 }}
+            >
+              선택 삭제
+            </button>
           </div>
           <input aria-label="검색" className="small-input" placeholder="이름·연락처·주문번호" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: 180 }} />
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -174,8 +220,21 @@ export default function Orders({ orders, reload, notify }) {
             </label>
             <button className="btn" onClick={() => fileRef.current?.click()}>송장 엑셀 업로드</button>
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={uploadTracking} />
+          </div>
+          <div style={{ width: '100%', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end' }}>
+            <span className="muted">주문일</span>
+            <input className="small-input" type="date" aria-label="엑셀 주문일 시작" value={from} onChange={(e) => setFrom(e.target.value)} />
+            <span>~</span>
+            <input className="small-input" type="date" aria-label="엑셀 주문일 끝" value={to} onChange={(e) => setTo(e.target.value)} />
+            <button className="chip" onClick={() => quick(kstToday(), kstToday())}>오늘</button>
+            <button className="chip" onClick={() => quick(addDays(kstToday(), -1), addDays(kstToday(), -1))}>어제</button>
+            <button className="chip" onClick={() => quick(addDays(kstToday(), -6), kstToday())}>최근 7일</button>
+            {(from || to) && <button className="btn-text" onClick={() => quick('', '')}>기간 지우기</button>}
+            <label className="muted" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="checkbox" checked={withShipped} onChange={(e) => setWithShipped(e.target.checked)} /> 이미 발송한 주문도 포함
+            </label>
             <button className="btn btn-primary" onClick={exportExcel}>
-              롯데택배 엑셀 {sel.size ? `(선택 ${sel.size}건)` : '(접수 전체)'}
+              롯데택배 엑셀 ({excel.label})
             </button>
           </div>
         </div>

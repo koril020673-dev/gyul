@@ -84,7 +84,7 @@ export default function OrderPage() {
     setSending(false);
     if (error) {
       setError(error.message || '주문을 저장하지 못했어요.');
-      loadProducts(); // 품절 상태 다시 반영
+      loadProducts(); // 판매 종료 등 바뀐 상품 목록 다시 반영
       return;
     }
     setDone({ ...data, name: buyer.name });
@@ -185,12 +185,11 @@ export default function OrderPage() {
                   <div className="info">
                     <div className="name">{p.name}</div>
                     <div className="meta">{Number(p.weight_kg)}kg · {won(p.price)}</div>
-                    {p.sold_out && <div className="soldout">품절</div>}
                   </div>
                   <div className="stepper">
                     <button type="button" aria-label={`${productLabel(p)} 빼기`} onClick={() => changeQty(i, p.id, -1)} disabled={!s.qty[p.id]}>−</button>
                     <output aria-live="polite">{s.qty[p.id] || 0}</output>
-                    <button type="button" aria-label={`${productLabel(p)} 더하기`} onClick={() => changeQty(i, p.id, 1)} disabled={p.sold_out}>+</button>
+                    <button type="button" aria-label={`${productLabel(p)} 더하기`} onClick={() => changeQty(i, p.id, 1)}>+</button>
                   </div>
                 </div>
               ))}

@@ -9,16 +9,17 @@ create table if not exists products (
   name        text    not null,            -- 노지감귤, 한라봉
   ship_name   text,                        -- 택배 품목명 (밀감10k). 비우면 '노지감귤10k'처럼 자동
   weight_kg   numeric not null,            -- 5, 10, 3
-  price       integer not null default 0,  -- 원
-  stock_boxes integer not null default 0,  -- 관리자가 입력하는 "남은 박스"
+  price       integer not null default 0,  -- 원 (판매 현황 금액도 이 현재 가격으로 계산)
   is_active   boolean not null default true,
-  sale_start  date,                        -- 비우면 기간 제한 없음
-  sale_end    date,
+  sale_end    date,                        -- 판매 종료일. 비우면 계속 판매 (재고 제한 없음)
   sort_order  integer not null default 0,
   created_at  timestamptz not null default now()
 );
--- 예전에 만든 DB에서 다시 실행할 때를 위해 (supabase/002_ship_name.sql 과 같음)
+-- 예전에 만든 DB에서 다시 실행할 때를 위해 (supabase/002_ship_name.sql, 004_simplify.sql 과 같음)
 alter table products add column if not exists ship_name text;
+drop view if exists product_reserved;
+alter table products drop column if exists stock_boxes;
+alter table products drop column if exists sale_start;
 
 -- ---------- 주문 ----------
 -- 배송 상태: 접수 → 발송중 → 발송완료 (취소는 별도)
@@ -85,34 +86,37 @@ create policy admin_all on products       for all to authenticated using (true) 
 create policy admin_all on orders         for all to authenticated using (true) with check (true);
 create policy admin_all on shipments      for all to authenticated using (true) with check (true);
 create policy admin_all on shipment_items for all to authenticated using (true) with check (true);
+-- 주문 삭제: admin_all(for all)에 삭제가 포함되고, shipments·shipment_items 는 on delete cascade 로 같이 지워짐
 
--- ---------- 상품별 접수된 박스 수 (취소 제외) ----------
-create or replace view product_reserved
-with (security_invoker = true) as
-select p.id as product_id,
-       coalesce(sum(si.qty) filter (where o.status <> '취소'), 0)::int as reserved_boxes
-from products p
-left join shipment_items si on si.product_id = p.id
-left join shipments s on s.id = si.shipment_id
-left join orders o on o.id = s.order_id
-group by p.id;
+-- ---------- 설정 (시즌 시작일 등). 로그인한 관리자만 읽기·쓰기 ----------
+create table if not exists settings (
+  key   text primary key,
+  value text
+);
+alter table settings enable row level security;
+drop policy if exists admin_all on settings;
+create policy admin_all on settings for all to authenticated using (true) with check (true);
+grant select, insert, update, delete on settings to authenticated;
+revoke all on settings from anon;
+-- 이번 시즌 시작일: 없을 때만 한국시간 오늘로 (관리자 화면의 "새 시즌 시작"으로 바꿈)
+insert into settings (key, value)
+values ('season_start', ((now() at time zone 'Asia/Seoul')::date)::text)
+on conflict (key) do nothing;
 
--- ---------- 오늘(한국시간) 판매 중인지 ----------
+-- ---------- 오늘(한국시간) 판매 중인지: 판매 체크 + 종료일 ----------
 create or replace function is_on_sale(p products) returns boolean
 language sql stable as $$
   select p.is_active
-     and (p.sale_start is null or (now() at time zone 'Asia/Seoul')::date >= p.sale_start)
-     and (p.sale_end   is null or (now() at time zone 'Asia/Seoul')::date <= p.sale_end);
+     and (p.sale_end is null or (now() at time zone 'Asia/Seoul')::date <= p.sale_end);
 $$;
 
--- ---------- [고객] 주문서에 보여줄 상품 (재고 수량은 숨기고 품절 여부만) ----------
-create or replace function get_products()
-returns table (id bigint, name text, weight_kg numeric, price integer, sold_out boolean)
+-- ---------- [고객] 주문서에 보여줄 상품 ----------
+drop function if exists get_products();
+create function get_products()
+returns table (id bigint, name text, weight_kg numeric, price integer)
 language sql stable security definer set search_path = public as $$
-  select p.id, p.name, p.weight_kg, p.price,
-         (r.reserved_boxes >= p.stock_boxes) as sold_out
+  select p.id, p.name, p.weight_kg, p.price
   from products p
-  join product_reserved r on r.product_id = p.id
   where is_on_sale(p)
   order by p.sort_order, p.id;
 $$;
@@ -129,9 +133,7 @@ language sql stable security definer set search_path = public as $$
 $$;
 
 -- ---------- [고객] 주문 접수 ----------
--- 재고 규칙: 남은 박스가 1개라도 있으면 그 주문은 전부 받는다(재고를 넘어도 OK).
---            접수 박스 >= 재고가 되면 그 다음부터 품절.
--- 동시에 들어온 주문은 상품 행 잠금(for update)으로 한 줄로 세워서 처리.
+-- 재고 제한 없음: 판매 중인 상품(is_on_sale)인지만 확인
 --
 -- payload 예시:
 -- { "buyer_name":"홍길동", "buyer_phone":"010-1234-5678", "payer_name":"", "referrer_name":"김철수",
@@ -149,8 +151,6 @@ declare
   v_ship     jsonb;
   v_item     jsonb;
   v_prod     products;
-  v_reserved integer;
-  v_pid      bigint;
   v_phone    text := regexp_replace(coalesce(payload->>'buyer_phone',''), '\D', '', 'g');
 begin
   if coalesce(trim(payload->>'buyer_name'),'') = '' or length(v_phone) < 9 then
@@ -160,23 +160,17 @@ begin
     raise exception '받는 분을 한 명 이상 입력해 주세요';
   end if;
 
-  -- 1) 주문에 들어있는 상품들을 잠그고 재고 확인
-  for v_pid in
-    select distinct (i->>'product_id')::bigint
-    from jsonb_array_elements(payload->'shipments') s,
-         jsonb_array_elements(s->'items') i
+  -- 1) 주문에 들어있는 상품이 모두 판매 중인지 확인 (재고 제한 없음)
+  if exists (
+    select 1
+    from jsonb_array_elements(payload->'shipments') s
+    cross join lateral jsonb_array_elements(s->'items') i
+    left join products p on p.id = (i->>'product_id')::bigint
     where coalesce((i->>'qty')::int, 0) > 0
-    order by 1
-  loop
-    select * into v_prod from products where id = v_pid for update;
-    if not found or not is_on_sale(v_prod) then
-      raise exception '판매하지 않는 상품이 포함되어 있어요';
-    end if;
-    select reserved_boxes into v_reserved from product_reserved where product_id = v_pid;
-    if v_reserved >= v_prod.stock_boxes then
-      raise exception '% %kg 상품이 품절되었어요', v_prod.name, v_prod.weight_kg;
-    end if;
-  end loop;
+      and (p.id is null or not is_on_sale(p))
+  ) then
+    raise exception '판매하지 않는 상품이 포함되어 있어요';
+  end if;
 
   -- 2) 주문 저장
   insert into orders (buyer_name, buyer_phone, payer_name, referrer_name)
@@ -249,21 +243,20 @@ $$;
 -- 관리자(로그인) 권한. 새 프로젝트는 테이블이 자동 공개되지 않을 수 있어서 명시
 grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on products, orders, shipments, shipment_items to authenticated;
-grant select on product_reserved to authenticated;
-revoke all on products, orders, shipments, shipment_items, product_reserved from anon;
+revoke all on products, orders, shipments, shipment_items from anon;
 
 grant execute on function get_products()              to anon, authenticated;
 grant execute on function get_referrer_names(text)    to anon, authenticated;
 grant execute on function place_order(jsonb)          to anon, authenticated;
 grant execute on function lookup_orders(text, text)   to anon, authenticated;
 
--- ---------- 처음 상품 (가격·재고는 관리자 화면에서 수정) ----------
-insert into products (name, ship_name, weight_kg, price, stock_boxes, is_active, sort_order)
+-- ---------- 처음 상품 (가격·판매 종료일은 관리자 화면에서 수정) ----------
+insert into products (name, ship_name, weight_kg, price, is_active, sort_order)
 select * from (values
-  ('노지감귤', '밀감10k',  10, 0, 0, true,  1),
-  ('노지감귤', '밀감5k',   5,  0, 0, true,  2),
-  ('한라봉',   '한라봉3k', 3,  0, 0, false, 3)
-) v(name, ship_name, weight_kg, price, stock_boxes, is_active, sort_order)
+  ('노지감귤', '밀감10k',  10, 0, true,  1),
+  ('노지감귤', '밀감5k',   5,  0, true,  2),
+  ('한라봉',   '한라봉3k', 3,  0, false, 3)
+) v(name, ship_name, weight_kg, price, is_active, sort_order)
 where not exists (select 1 from products);
 
 -- =========================================================
