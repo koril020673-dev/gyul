@@ -21,7 +21,8 @@ create table if not exists products (
 alter table products add column if not exists ship_name text;
 
 -- ---------- 주문 ----------
--- 상태: 입금대기 → 입금확인 → 발송중 → 발송완료 (취소는 별도)
+-- 배송 상태: 접수 → 발송중 → 발송완료 (취소는 별도)
+-- 입금 여부는 상태와 따로: paid_at (null = 미입금, 값 있음 = 입금확인). 입금 전에 발송해도 됨
 create table if not exists orders (
   id            bigint generated always as identity (start with 1001) primary key,
   buyer_name    text not null,
@@ -29,8 +30,8 @@ create table if not exists orders (
   payer_name    text,
   referrer_name text,
   total_price   integer not null default 0,
-  status        text not null default '입금대기'
-                check (status in ('입금대기','입금확인','발송중','발송완료','취소')),
+  status        text not null default '접수'
+                constraint orders_status_check check (status in ('접수','발송중','발송완료','취소')),
   paid_at       timestamptz,
   shipped_at    timestamptz,
   delivered_at  timestamptz,
@@ -259,8 +260,8 @@ grant execute on function lookup_orders(text, text)   to anon, authenticated;
 -- ---------- 처음 상품 (가격·재고는 관리자 화면에서 수정) ----------
 insert into products (name, ship_name, weight_kg, price, stock_boxes, is_active, sort_order)
 select * from (values
-  ('노지감귤', '밀감5k',   5,  0, 0, true,  1),
-  ('노지감귤', '밀감10k',  10, 0, 0, true,  2),
+  ('노지감귤', '밀감10k',  10, 0, 0, true,  1),
+  ('노지감귤', '밀감5k',   5,  0, 0, true,  2),
   ('한라봉',   '한라봉3k', 3,  0, 0, false, 3)
 ) v(name, ship_name, weight_kg, price, stock_boxes, is_active, sort_order)
 where not exists (select 1 from products);

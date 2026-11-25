@@ -1,15 +1,34 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { won } from '@/lib/format';
 
 const blank = { name: '', ship_name: '', weight_kg: '', price: '', stock_boxes: '', is_active: false, sale_start: '', sale_end: '' };
 
-export default function Products({ products, reload, notify }) {
+export default function Products({ products, orders = [], reload, notify }) {
   const [rows, setRows] = useState([]);
   const [adding, setAdding] = useState(blank);
 
   useEffect(() => { setRows(products.map((p) => ({ ...p, ship_name: p.ship_name || '', sale_start: p.sale_start || '', sale_end: p.sale_end || '' }))); }, [products]);
+
+  // 판매 집계: 취소를 뺀 주문(파기된 주문 포함)의 shipment_items 기준, 금액은 주문 당시 단가 × 수량
+  const sales = useMemo(() => {
+    const byProduct = {};
+    const total = { boxes: 0, kg: 0, amount: 0, paid: 0, unpaid: 0 };
+    for (const o of orders) {
+      if (o.status === '취소') continue;
+      for (const s of o.shipments || []) for (const it of s.shipment_items || []) {
+        const kg = it.qty * Number(it.products?.weight_kg || 0);
+        const amount = it.qty * (it.unit_price || 0);
+        const p = (byProduct[it.product_id] ||= { boxes: 0, kg: 0, amount: 0 });
+        p.boxes += it.qty; p.kg += kg; p.amount += amount;
+        total.boxes += it.qty; total.kg += kg; total.amount += amount;
+        if (o.paid_at) total.paid += amount; else total.unpaid += amount;
+      }
+    }
+    return { byProduct, total };
+  }, [orders]);
 
   const edit = (id, patch) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...patch } : r)));
   const clean = (r) => ({
@@ -39,11 +58,11 @@ export default function Products({ products, reload, notify }) {
         <span className="muted">남은 박스가 1개라도 있으면 그 주문은 다 받고, 접수 박스가 재고 이상이 되면 주문서에 품절이 떠요. 고객에게 수량은 안 보여요.</span>
       </div>
       <div className="scroll">
-        <table className="grid" style={{ minWidth: 1100 }}>
+        <table className="grid" style={{ minWidth: 1380 }}>
           <thead>
             <tr>
               <th>판매</th><th>상품명</th><th>택배 품목명</th><th>중량(kg)</th><th>가격(원)</th><th>재고(박스)</th>
-              <th>접수 / 남음</th><th>판매 기간 (비우면 제한 없음)</th><th></th>
+              <th>접수 / 남음</th><th>판매 기간 (비우면 제한 없음)</th><th>판매 박스</th><th>판매 kg</th><th>판매금액</th><th></th>
             </tr>
           </thead>
           <tbody>
@@ -66,6 +85,9 @@ export default function Products({ products, reload, notify }) {
                     {' ~ '}
                     <input className="small-input" type="date" aria-label="종료일" value={r.sale_end} onChange={(e) => edit(r.id, { sale_end: e.target.value })} />
                   </td>
+                  <td className="nowrap">{sales.byProduct[r.id]?.boxes || 0}박스</td>
+                  <td className="nowrap">{sales.byProduct[r.id]?.kg || 0}kg</td>
+                  <td className="nowrap">{won(sales.byProduct[r.id]?.amount)}</td>
                   <td><button className="btn btn-primary" style={{ height: 38 }} onClick={() => save(r)}>저장</button></td>
                 </tr>
               );
@@ -83,10 +105,15 @@ export default function Products({ products, reload, notify }) {
                 {' ~ '}
                 <input className="small-input" type="date" aria-label="새 종료일" value={adding.sale_end} onChange={(e) => setAdding({ ...adding, sale_end: e.target.value })} />
               </td>
+              <td></td><td></td><td></td>
               <td><button className="btn" style={{ height: 38 }} onClick={add}>추가</button></td>
             </tr>
           </tbody>
         </table>
+      </div>
+      <div className="panel-foot">
+        <b>전체 합계</b> · 총 {sales.total.boxes}박스 · {sales.total.kg}kg · 판매금액 {won(sales.total.amount)}
+        {' '}(입금확인 {won(sales.total.paid)} · 미입금 {won(sales.total.unpaid)}) · 취소 제외, 주문 당시 가격 기준
       </div>
     </section>
   );

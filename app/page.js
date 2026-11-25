@@ -103,7 +103,7 @@ export default function OrderPage() {
           <section className="card">
             <div className="sum-line"><span>주문번호</span><strong>{done.order_id}</strong></div>
             <div className="total"><span>입금하실 금액</span><strong>{won(done.total_price)}</strong></div>
-            <div className="note">{`입금 계좌: ${config.bankInfo}\n입금이 확인되면 순서대로 발송해요.`}</div>
+            <div className="note">{`입금 계좌: ${config.bankInfo}\n주문 순서대로 발송해요.`}</div>
           </section>
           <Link href="/lookup" className="btn btn-primary btn-big" style={{ display: 'grid', placeItems: 'center', textDecoration: 'none' }}>
             주문 상태 확인하기
@@ -212,7 +212,7 @@ export default function OrderPage() {
           <div className="sum-line"><span>박스 / 중량</span><span>{summary.boxes}박스 · {summary.kg}kg</span></div>
           <div className="hr" />
           <div className="total"><span style={{ fontWeight: 700 }}>총 금액</span><strong>{won(summary.total)}</strong></div>
-          <div className="note">{`입금 계좌: ${config.bankInfo}\n입금 확인 후 순서대로 발송해요.`}</div>
+          <div className="note">{`입금 계좌: ${config.bankInfo}\n주문 순서대로 발송해요.`}</div>
         </section>
 
         <label className="consent">

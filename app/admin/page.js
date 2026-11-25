@@ -59,7 +59,7 @@ export default function AdminPage() {
       <main className="container">
         {tab === 'orders' && <Orders orders={orders} reload={reload} notify={notify} />}
         {tab === 'referrals' && <Referrals orders={orders} products={products} reload={reload} notify={notify} />}
-        {tab === 'products' && <Products products={products} reload={reload} notify={notify} />}
+        {tab === 'products' && <Products products={products} orders={orders} reload={reload} notify={notify} />}
       </main>
       {flash && <div className="flash" role="status">{flash}</div>}
     </div>

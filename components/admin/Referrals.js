@@ -4,7 +4,7 @@ import { useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { productLabel } from '@/lib/format';
 
-const COUNTED = ['입금확인', '발송중', '발송완료'];
+// 취소를 뺀 모든 주문(접수·발송중·발송완료)을 셈. 입금 여부와 무관, 파기된 주문도 포함
 
 export default function Referrals({ orders, products, reload, notify }) {
   const [from, setFrom] = useState('');
@@ -16,7 +16,7 @@ export default function Referrals({ orders, products, reload, notify }) {
     for (const o of orders) {
       if (!o.referrer_name) continue;
       all.add(o.referrer_name);
-      if (!COUNTED.includes(o.status)) continue;
+      if (o.status === '취소') continue;
       const r = (map[o.referrer_name] ||= { name: o.referrer_name, orders: 0, byProduct: {}, boxes: 0, kg: 0 });
       r.orders++;
       for (const s of o.shipments || []) for (const it of s.shipment_items || []) {
@@ -43,7 +43,7 @@ export default function Referrals({ orders, products, reload, notify }) {
       <section className="panel">
         <div className="panel-head">
           <h2>추천인별 판매</h2>
-          <span className="muted">입금확인·발송중·발송완료 주문만 집계</span>
+          <span className="muted">취소를 뺀 모든 주문(접수·발송중·발송완료) 집계</span>
         </div>
         <div className="scroll">
           <table className="grid" style={{ minWidth: 640 }}>

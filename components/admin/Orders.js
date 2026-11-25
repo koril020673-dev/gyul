@@ -7,15 +7,18 @@ import { StatusPill } from '@/components/StatusSteps';
 import { downloadLotteExcel, parseTrackingFile } from '@/lib/excel';
 import { config } from '@/lib/config';
 
-const FILTERS = ['전체', '입금대기', '입금확인', '발송중', '발송완료', '취소'];
-const NEXT = { 입금대기: '입금확인', 입금확인: '발송중', 발송중: '발송완료' };
-const STAMP = { 입금확인: 'paid_at', 발송중: 'shipped_at', 발송완료: 'delivered_at' };
+const FILTERS = ['전체', '접수', '발송중', '발송완료', '취소'];
+const UNPAID = '미입금'; // 상태와 별개인 필터: 입금 안 됐고 취소가 아닌 주문
+const NEXT = { 접수: '발송중', 발송중: '발송완료' };
+const STAMP = { 발송중: 'shipped_at', 발송완료: 'delivered_at' };
+
+const isUnpaid = (o) => !o.paid_at && o.status !== '취소';
 
 const boxesOf = (o) => (o.shipments || []).reduce((n, s) => n + (s.shipment_items || []).reduce((m, it) => m + it.qty, 0), 0);
 const kgOf = (o) => (o.shipments || []).reduce((n, s) => n + (s.shipment_items || []).reduce((m, it) => m + it.qty * Number(it.products.weight_kg), 0), 0);
 
 export default function Orders({ orders, reload, notify }) {
-  const [filter, setFilter] = useState('입금대기');
+  const [filter, setFilter] = useState('접수');
   const [q, setQ] = useState('');
   const [sel, setSel] = useState(new Set());
   const [split, setSplit] = useState(true);
@@ -24,7 +27,8 @@ export default function Orders({ orders, reload, notify }) {
   const shown = useMemo(() => {
     const k = q.trim().replace(/-/g, '');
     return orders.filter((o) => {
-      if (filter !== '전체' && o.status !== filter) return false;
+      if (filter === UNPAID) { if (!isUnpaid(o)) return false; }
+      else if (filter !== '전체' && o.status !== filter) return false;
       if (!k) return true;
       const hay = [o.id, o.buyer_name, o.buyer_phone, o.payer_name, ...(o.shipments || []).flatMap((s) => [s.recipient_name, s.recipient_phone])].join(' ');
       return hay.includes(k);
@@ -32,12 +36,14 @@ export default function Orders({ orders, reload, notify }) {
   }, [orders, filter, q]);
 
   const stats = useMemo(() => {
-    const paid = orders.filter((o) => o.status === '입금확인');
+    const ready = orders.filter((o) => o.status === '접수');
+    const unpaid = orders.filter(isUnpaid);
     return {
-      wait: orders.filter((o) => o.status === '입금대기').length,
-      paid: paid.length,
-      boxes: paid.reduce((n, o) => n + boxesOf(o), 0),
-      kg: paid.reduce((n, o) => n + kgOf(o), 0),
+      ready: ready.length,
+      boxes: ready.reduce((n, o) => n + boxesOf(o), 0),
+      kg: ready.reduce((n, o) => n + kgOf(o), 0),
+      unpaid: unpaid.length,
+      unpaidWon: unpaid.reduce((n, o) => n + (o.total_price || 0), 0),
     };
   }, [orders]);
 
@@ -62,22 +68,32 @@ export default function Orders({ orders, reload, notify }) {
     reload();
   }
 
+  // 입금 여부는 배송 상태와 따로 저장 (파기된 주문도 가능)
+  async function setPaid(ids, paid) {
+    if (!ids.length) return;
+    const { error } = await supabase.from('orders').update({ paid_at: paid ? new Date().toISOString() : null }).in('id', ids);
+    if (error) return notify('입금 저장 실패: ' + error.message);
+    notify(`${ids.length}건 입금확인 ${paid ? '체크' : '해제'}`);
+    reload();
+  }
+
   async function saveTracking(order, s, value) {
     if (order.purged_at) return; // 파기된 주문은 송장 수정 안 함
     const v = value.replace(/[^0-9,\s]/g, '').trim();
     if ((s.tracking_no || '') === v) return;
     const { error } = await supabase.from('shipments').update({ tracking_no: v || null }).eq('id', s.id);
     if (error) return notify('송장 저장 실패: ' + error.message);
-    if (v && order.status === '입금확인') await setStatus([order.id], '발송중');
+    if (v && order.status === '접수') await setStatus([order.id], '발송중');
     else { notify('송장번호 저장'); reload(); }
   }
 
   function exportExcel() {
-    const picked = sel.size ? orders.filter((o) => sel.has(o.id)) : orders.filter((o) => o.status === '입금확인');
+    // 기본 대상: 선택한 주문, 없으면 접수 상태 전체 (입금 여부 무관)
+    const picked = sel.size ? orders.filter((o) => sel.has(o.id)) : orders.filter((o) => o.status === '접수');
     // 개인정보가 파기된 주문은 주소가 없으므로 엑셀에서 제외
     const target = picked.filter((o) => !o.purged_at);
     const skipped = picked.length - target.length;
-    if (!target.length) return notify(skipped ? '선택한 주문은 모두 개인정보가 파기되어 내보낼 수 없어요.' : '내보낼 주문이 없어요. 입금확인 주문이 있거나 선택해야 해요.');
+    if (!target.length) return notify(skipped ? '선택한 주문은 모두 개인정보가 파기되어 내보낼 수 없어요.' : '내보낼 주문이 없어요. 접수 주문이 있거나 선택해야 해요.');
     const n = downloadLotteExcel(target, { splitBoxes: split });
     notify(`${target.length}건 · ${n}줄 다운로드${skipped ? ` · 파기된 주문 ${skipped}건 제외` : ''}`);
   }
@@ -110,7 +126,7 @@ export default function Orders({ orders, reload, notify }) {
         const { error } = await supabase.from('shipments').update({ tracking_no: map[key].join(', ') }).eq('id', s.id);
         if (error) { miss++; continue; }
         ok++;
-        if (byId[oid].status === '입금확인') shippedOrders.add(oid);
+        if (byId[oid].status === '접수') shippedOrders.add(oid);
       }
       if (shippedOrders.size) {
         await supabase.from('orders').update({ status: '발송중', shipped_at: new Date().toISOString() }).in('id', [...shippedOrders]);
@@ -127,10 +143,10 @@ export default function Orders({ orders, reload, notify }) {
   return (
     <>
       <div className="stats">
-        <div className="stat"><div>입금대기</div><strong>{stats.wait}건</strong></div>
-        <div className="stat"><div>발송 대기 (입금확인)</div><strong>{stats.paid}건</strong></div>
+        <div className="stat"><div>발송 대기 (접수)</div><strong>{stats.ready}건</strong></div>
         <div className="stat"><div>발송할 박스</div><strong>{stats.boxes}박스</strong></div>
         <div className="stat"><div>발송할 중량</div><strong>{stats.kg}kg</strong></div>
+        <div className="stat"><div>미입금</div><strong>{stats.unpaid}건</strong><div>{won(stats.unpaidWon)}</div></div>
       </div>
 
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
@@ -147,6 +163,9 @@ export default function Orders({ orders, reload, notify }) {
                 {f}{f !== '전체' && ` ${orders.filter((o) => o.status === f).length}`}
               </button>
             ))}
+            <button className="chip" aria-pressed={filter === UNPAID} onClick={() => { setFilter(UNPAID); setSel(new Set()); }}>
+              {UNPAID} {orders.filter(isUnpaid).length}
+            </button>
           </div>
           <input aria-label="검색" className="small-input" placeholder="이름·연락처·주문번호" value={q} onChange={(e) => setQ(e.target.value)} style={{ width: 180 }} />
           <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -156,7 +175,7 @@ export default function Orders({ orders, reload, notify }) {
             <button className="btn" onClick={() => fileRef.current?.click()}>송장 엑셀 업로드</button>
             <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" hidden onChange={uploadTracking} />
             <button className="btn btn-primary" onClick={exportExcel}>
-              롯데택배 엑셀 {sel.size ? `(선택 ${sel.size}건)` : '(입금확인 전체)'}
+              롯데택배 엑셀 {sel.size ? `(선택 ${sel.size}건)` : '(접수 전체)'}
             </button>
           </div>
         </div>
@@ -164,11 +183,12 @@ export default function Orders({ orders, reload, notify }) {
         {sel.size > 0 && (
           <div className="actions">
             <b>선택 {sel.size}건</b>
-            <button className="btn btn-primary" onClick={() => setStatus(ids, '입금확인')}>입금확인</button>
-            <button className="btn" onClick={() => setStatus(ids, '발송중')}>발송중</button>
+            <button className="btn btn-primary" onClick={() => setStatus(ids, '발송중')}>발송중</button>
             <button className="btn" onClick={() => setStatus(ids, '발송완료')}>발송완료</button>
-            <button className="btn" onClick={() => setStatus(ids, '입금대기')}>입금대기로 되돌리기</button>
+            <button className="btn" onClick={() => setStatus(ids, '접수')}>접수로 되돌리기</button>
             <button className="btn" onClick={() => setStatus(ids, '취소')}>취소</button>
+            <button className="btn" onClick={() => setPaid(ids, true)}>입금확인 체크</button>
+            <button className="btn" onClick={() => setPaid(ids, false)}>입금확인 해제</button>
           </div>
         )}
 
@@ -182,6 +202,7 @@ export default function Orders({ orders, reload, notify }) {
                 <th>받는 분 · 주소 · 상품</th>
                 <th>금액</th>
                 <th>상태</th>
+                <th>입금확인</th>
                 <th>송장번호</th>
               </tr>
             </thead>
@@ -228,6 +249,13 @@ export default function Orders({ orders, reload, notify }) {
                       </div>
                     )}
                   </td>
+                  <td className="nowrap">
+                    <input
+                      type="checkbox" aria-label={`${o.id} 입금확인`} checked={!!o.paid_at}
+                      onChange={(e) => setPaid([o.id], e.target.checked)} style={{ width: 20, height: 20 }}
+                    />
+                    {o.paid_at && <div className="muted" style={{ fontSize: 12 }}>{date(o.paid_at)}</div>}
+                  </td>
                   <td>
                     {[...(o.shipments || [])].sort((a, b) => a.seq - b.seq).map((s) => (
                       <div className="ship-line" key={s.id}>
@@ -245,14 +273,14 @@ export default function Orders({ orders, reload, notify }) {
                 </tr>
               ))}
               {shown.length === 0 && (
-                <tr><td colSpan={7} className="muted" style={{ padding: 24, textAlign: 'center' }}>해당하는 주문이 없어요.</td></tr>
+                <tr><td colSpan={8} className="muted" style={{ padding: 24, textAlign: 'center' }}>해당하는 주문이 없어요.</td></tr>
               )}
             </tbody>
           </table>
         </div>
         <div className="panel-foot">
           엑셀은 받는 분 한 곳당 한 줄이고, 주문번호는 &quot;주문-받는분순서&quot;(예: 1024-1)로 나가요. 추천인은 엑셀에 포함되지 않아요.
-          송장번호를 넣거나 송장 엑셀을 올리면 입금확인 주문이 자동으로 발송중이 돼요.
+          송장번호를 넣거나 송장 엑셀을 올리면 접수 주문이 자동으로 발송중이 돼요. 입금 여부는 배송과 따로 체크해요.
         </div>
       </section>
     </>

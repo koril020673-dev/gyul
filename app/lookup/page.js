@@ -35,7 +35,7 @@ export default function LookupPage() {
       <header className="hero">
         <small>{config.farmName} · 제주</small>
         <h1>주문 조회</h1>
-        <p>입금 확인부터 배송까지 지금 어디쯤인지 볼 수 있어요.</p>
+        <p>주문접수부터 배송까지 지금 어디쯤인지 볼 수 있어요.</p>
         <nav><Link href="/">← 주문서로 가기</Link></nav>
       </header>
 
@@ -65,7 +65,6 @@ export default function LookupPage() {
             </div>
             <div className="muted">{date(o.created_at)} 주문 · {won(o.total_price)}</div>
             <StatusSteps status={o.status} />
-            {o.status === '입금대기' && <div className="note">{`입금 계좌: ${config.bankInfo}\n입금이 확인되면 '입금확인'으로 바뀌어요.`}</div>}
             {(o.shipments || []).map((s) => (
               <div key={s.seq} className="note" style={{ background: '#fff', border: '1px solid var(--line)', whiteSpace: 'normal' }}>
                 <div style={{ fontWeight: 700, color: 'var(--text)' }}>{s.recipient_name}님께</div>
